@@ -1,93 +1,72 @@
 const { Client, IntentsBitField } = require("discord.js");
 const { init } = require("./db");
-
 require("dotenv").config({ path: ".env.local" });
-const mongoose = require("mongoose");
-const BOT_TOKEN = process.env.BOT_TOKEN;
 
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const client = new Client({
   intents: [
     IntentsBitField.Flags.Guilds,
     IntentsBitField.Flags.GuildMembers,
-    IntentsBitField.Flags.MessageContent,
-  ],
+    IntentsBitField.Flags.MessageContent
+  ]
 });
 
-async function watchUserGearDatabaseChanges() {
+async function watchDatabaseChanges(
+  collectionName,
+  idField,
+  notificationFunction
+) {
   try {
     const { db } = await init();
-    const userGearCollection = db.collection("usergear");
+    const collection = db.collection(collectionName);
 
-    const changeStream = userGearCollection.watch();
+    const changeStream = collection.watch();
 
-    changeStream.on("change", async (change) => {
+    changeStream.on("change", async change => {
       if (change.operationType === "insert") {
         const newEntry = change.fullDocument;
-        const userId = newEntry.userId;
-        const gearId = newEntry.gearId;
-        sendNotificationToDiscordChannel(userId, gearId);
+        const userId = newEntry[idField];
+        notificationFunction(userId, newEntry);
       }
     });
   } catch (error) {
-    console.error("Error setting up change stream:", error);
-    throw error;
-  }
-}
-async function watchUserCluesDatabaseChanges() {
-  try {
-    const { db } = await init();
-    const userClueCollection = db.collection("userclues");
-
-    const changeStream = userClueCollection.watch();
-
-    changeStream.on("change", async (change) => {
-      if (change.operationType === "insert") {
-        const newEntry = change.fullDocument;
-        const userId = newEntry.userId;
-        const clueId = newEntry.clueId;
-        sendNotificationToDiscordChannel(userId, (gearId = null), clueId);
-      }
-    });
-  } catch (error) {
-    console.error("Error setting up change stream:", error);
+    console.error(
+      `Error setting up change stream for ${collectionName}:`,
+      error
+    );
     throw error;
   }
 }
 
-async function sendNotificationToDiscordChannel(userId, gearId, clueId) {
+async function sendNotificationToDiscordChannel(userId, entry) {
   const guildId = process.env.GUILD_ID;
   const channelId = process.env.CHANNEL_ID;
   const roleId = process.env.GIM_ROLE_ID;
   const roleMention = `<@&${roleId}>`;
+
   try {
     const { users, gears, clues } = await init();
-
     const user = await users.findOne(userId);
 
     if (!user) {
       console.error("User not found.");
-      const user = process.env.PM_ERRORS;
-      const userObject = await client.users.fetch(user);
+      const errorUser = process.env.PM_ERRORS;
+      const userObject = await client.users.fetch(errorUser);
 
       userObject.send(
-        `User not found rom this function: sendNotificationToDiscordChannel on line 57`
+        `User not found from this function: sendNotificationToDiscordChannel on line 57`
       );
       return;
     }
+
     let itemName = "";
 
-    if (clueId) {
-      const clue = await clues.findOne(clueId);
-
-      if (clue) {
-        itemName = clue.name;
-      }
-    } else if (gearId) {
-      const gear = await gears.findOne(gearId);
-
-      if (gear) {
-        itemName = gear.name;
-      }
+    if (entry.clueId) {
+      const clue = await clues.findOne(entry.clueId);
+      itemName = clue ? clue.name : "";
+    } else if (entry.gearId) {
+      const gear = await gears.findOne(entry.gearId);
+      itemName = gear ? gear.name : "";
     }
 
     if (!itemName) {
@@ -100,47 +79,26 @@ async function sendNotificationToDiscordChannel(userId, gearId, clueId) {
     const guild = await client.guilds.fetch(guildId);
     const channel = guild.channels.cache.get(channelId);
 
-    channel.send(`${roleMention} ${userName} just got the ${itemName}!`);
+    const message = await channel.send(
+      `${roleMention} ${userName} just got the ${itemName}!`
+    );
+
+    setTimeout(() => {
+      message
+        .delete()
+        .catch(error =>
+          userObject.send(`Time Out Error deleting message, ${message}:`, error)
+        );
+    }, 86400000);
   } catch (error) {
     console.error("Error fetching user and gear names:", error);
   }
 }
 
-/**
- *
- * Add a role to a user
- */
-
-// client.on("interactionCreate", async (interaction) => {
-//   try {
-//     await interaction.deferReply({ ephemeral: true });
-//     const role = interaction.guild.roles.cache.get(interaction.customId);
-
-//     if (!role) {
-//       interaction.reply({
-//         content: "I couldnt find that role",
-//       });
-//       return;
-//     }
-
-//     const hasRole = interaction.member.roles.cache.has(role.id);
-
-//     if (hasRole) {
-//       await interaction.member.roles.remove(role);
-//       await interaction.editReply(`the role ${role} has been removed.`);
-//       return;
-//     }
-//     await interaction.member.roles.add(role);
-//     await interaction.editReply(`The role ${role} has been added.`);
-//   } catch (error) {
-//     console.log(error);
-//   }
-// });
-
-client.on("ready", (client) => {
+client.on("ready", () => {
   console.log(`${client.user.tag} is online`);
-  watchUserGearDatabaseChanges();
-  watchUserCluesDatabaseChanges();
+  watchDatabaseChanges("usergear", "userId", sendNotificationToDiscordChannel);
+  watchDatabaseChanges("userclues", "userId", sendNotificationToDiscordChannel);
 });
 
 client.login(BOT_TOKEN);
